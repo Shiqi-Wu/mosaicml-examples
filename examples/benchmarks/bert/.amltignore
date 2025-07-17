@@ -1,0 +1,9 @@
+data/c4/
+data/
+*.pt
+*.ckpt
+logs/
+wandb/
+ckpts/
+my-copy-c4/
+asserts/

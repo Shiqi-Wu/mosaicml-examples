@@ -1,0 +1,7 @@
+einops
+mosaicml
+transformer_engine
+transformers
+omegaconf
+triton
+datasets

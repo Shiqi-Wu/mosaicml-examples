@@ -1,0 +1,71 @@
+description: mosaic_bert_base_uncased_a100
+
+env_defaults:
+  NODES: 1
+  GPUS: 8
+  STORAGE_ACCOUNT_NAME: sfmstorageeastus2
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  WANDB_ENTITY: ${WANDB_ENTITY}
+  WANDB_PROJECT: ${WANDB_PROJECT}
+  WANDB_RUN_GROUP: "mosaic-bert-dev"
+
+target:
+  service: sing
+  name: msroctovc
+  workspace_name: sfm-ws
+
+environment:
+  image: genomic-research/mosaic-bert:v100-dev-latest
+  registry: msrmoldyn.azurecr.io
+  username: msrmoldyn
+  setup:
+  - pip install -r requirements.txt
+  - pip install azure-identity azure-storage-blob
+  - export PATH="/home/aiscuser/.local/bin:$$PATH"
+
+storage:
+  hai1:
+    storage_account_name: ${STORAGE_ACCOUNT_NAME}
+    container_name: nlm
+    mount_dir: /nlm
+
+code:
+  local_dir: ../bert
+  ignore:
+    - data/c4
+
+jobs:
+- name: mosaic_bert_base_uncased_a100
+  identity: managed
+  tags: [Project_Name:Mosaic_BERT, Task:Pretrain]
+  sku: ${NODES}xG${GPUS}-A100-IB
+  sla_tier: Premium
+  mpi: true
+  process_count_per_node: 1
+  command:
+  - export WANDB_RUN_NAME=${WANDB_PROJECT}
+  - export WANDB_PROJECT=${WANDB_PROJECT}
+  - export WANDB_ENTITY=${WANDB_ENTITY}
+  - export WANDB_API_KEY=${WANDB_API_KEY}
+  - export WANDB_RUN_GROUP=${WANDB_RUN_GROUP}
+  - export NCCL_ASYNC_ERROR_HANDLING=1
+  - export NCCL_BLOCKING_WAIT=1
+  - export NCCL_TIMEOUT=1800
+  - export NCCL_DEBUG=WARN
+  - wandb login --relogin --host=https://microsoft-research.wandb.io $WANDB_API_KEY
+  - composer main.py yamls/main/mosaic-bert-base-uncased-a100.yaml
+
+  submit_args:
+    max_run_duration_seconds: 43200
+    env:
+      WANDB_BASE_URL: "https://microsoft-research.wandb.io"
+      WANDB_API_KEY: "$WANDB_API_KEY"
+      WANDB_ENTITY: "$WANDB_ENTITY"
+      WANDB_PROJECT: "$WANDB_PROJECT"
+      WANDB_RUN_GROUP: "$WANDB_RUN_GROUP"
+      SHARED_MEMORY_PERCENT: 0.9
+      AMLT_DOCKERFILE_TEMPLATE: "none"
+      _AZUREML_SINGULARITY_JOB_UAI: /subscriptions/3eaeebff-de6e-4e20-9473-24de9ca067dc/resourceGroups/sfm-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/sfm-job-identity
+      DATASET_MOUNT_BLOCK_BASED_CACHE_ENABLED: "true"
+      DATASET_MOUNT_READ_BUFFER_BLOCK_COUNT: 1
+      DATASET_MOUNT_MEMORY_CACHE_SIZE: 102400
