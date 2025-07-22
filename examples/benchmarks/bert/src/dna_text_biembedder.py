@@ -1,11 +1,17 @@
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer
+from transformers import PreTrainedTokenizer, AutoTokenizer, PreTrainedTokenizerFast
 import math
 
-import math
-import torch
-import torch.nn as nn
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import CharDelimiterSplit
+from tokenizers.normalizers import Lowercase
+from tokenizers.processors import TemplateProcessing
+import argparse
+from typing import Optional
+import os
 
 # Alibi Attention Block
 class AlibiAttentionBlock(nn.Module):
@@ -98,10 +104,69 @@ class RoPEAttentionBlock(nn.Module):
         return self.out_proj(attn_out)
 
 
-class BasewiseTransformerEmbedder(nn.Module):
-    def __init__(self, base_vocab_size=4, base_dim=64, hidden_dim=128, n_heads=4, n_layers=2, max_len=512, PositionalEmbedding="ALiBi"):
+class BPE2BaseIDMapper(nn.Module):
+    def __init__(self, token_vocab_size, max_bpe_len, base_pad_id=0, trainable=False, init_base_ids=None):
+        """
+        Args:
+            token_vocab_size: size of the BPE vocab
+            max_bpe_len: number of base tokens per BPE token
+            base_pad_id: ID for base-level padding
+            trainable: whether this mapping is trainable
+            init_base_ids: optional (token_vocab_size, max_bpe_len) tensor of base_ids
+        """
         super().__init__()
-        self.base_embedding = nn.Embedding(base_vocab_size, base_dim)
+        self.embedding = nn.Embedding(
+            num_embeddings=token_vocab_size,
+            embedding_dim=max_bpe_len,
+            padding_idx=None
+        )
+
+        if init_base_ids is not None:
+            self.embedding.weight.data.copy_(init_base_ids)
+        else:
+            self.embedding.weight.data.fill_(base_pad_id)
+
+        self.embedding.weight.requires_grad = trainable
+
+    def forward(self, token_ids: torch.LongTensor):
+        """
+        Args:
+            token_ids: (B, T)
+        Returns:
+            base_ids: (B, T, L) — integer ids for base tokens
+        """
+        return self.embedding(token_ids).long()
+
+
+class BasewiseTransformerEmbedder(nn.Module):
+    def __init__(self,
+                 token_vocab_size,
+                 base_vocab_size,
+                 max_bpe_len,
+                 base_dim=64,
+                 hidden_dim=128,
+                 n_heads=4,
+                 n_layers=2,
+                 base_pad_id=0,
+                 pooling="mean",
+                 PositionalEmbedding="ALiBi",
+                 trainable_bpe2base=False,
+                 init_base_ids=None):
+        super().__init__()
+
+        self.bpe2base = BPE2BaseIDMapper(
+            token_vocab_size=token_vocab_size,
+            max_bpe_len=max_bpe_len,
+            base_pad_id=base_pad_id,
+            trainable=trainable_bpe2base,
+            init_base_ids=init_base_ids
+        )
+
+        self.base_embedding = nn.Embedding(max_bpe_len, base_dim, padding_idx=base_pad_id)
+        self.pad_token_id = base_pad_id
+        self.pooling = pooling
+        self.max_len = max_len
+
         if PositionalEmbedding == "ALiBi":
             self.blocks = nn.ModuleList([
                 nn.Sequential(
@@ -126,19 +191,40 @@ class BasewiseTransformerEmbedder(nn.Module):
             raise ValueError(f"Unsupported positional embedding: {PositionalEmbedding}")
 
         self.proj = nn.Linear(base_dim, hidden_dim)
-        self.max_len = max_len
 
-    def forward(self, base_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, bpe_ids: torch.Tensor) -> torch.Tensor:
         """
-        base_ids: (B, T, L)
-        Returns: (B, T, hidden_dim)
+        Args:
+            bpe_ids: Tensor of shape (B, T, L) where:
+                - B: number of samples
+                - T: number of tokens per sample
+                - L: number of base pairs per token
+        Returns:
+            Tensor of shape (B, T, hidden_dim)
         """
-        B, T, L = base_ids.shape
-        x = self.base_embedding(base_ids.view(B * T, L))  # (B*T, L, D)
+        B, T = bpe_ids
+        flat_ids = bpe_ids.reshape(B * T, -1)              # (B*T, 1)
+        base_ids = self.bpe2base(flat_ids)                 # (B*T, L_max_bpe_len)
+        
+        x = self.base_embedding(flat_ids)                  # (B*T, L_max_bpe_len, base_dim)
+
         for block in self.blocks:
-            x = block(x)  # Each block includes AlibiAttentionBlock + FFN
-        x_cls = x[:, -1, :]  # use last token in base sequence
-        return self.proj(x_cls).view(B, -1)  # (B, hidden_dim)
+            x = block(x)  # e.g. transformer layer
+
+        if self.pooling == "last":
+            # May hit PAD if padding is on the right
+            x_cls = x[:, -1, :]                            # (B*T, hidden_dim)
+        elif self.pooling == "first":
+            x_cls = x[:, 0, :]                             # (B*T, hidden_dim)
+        elif self.pooling == "mean":
+            mask = (flat_ids != self.pad_token_id).float()  # (B*T, L_max_bpe_len)
+            mask = mask.unsqueeze(-1)                        # (B*T, L_max_bpe_len, 1)
+            x_masked = x * mask
+            x_cls = x_masked.sum(1) / mask.sum(1).clamp(min=1e-6)  # (B*T, hidden_dim)
+        else:
+            raise ValueError(f"Unsupported pooling strategy: {self.pooling}")
+
+        return self.proj(x_cls).reshape(B, T, -1)          # (B, T, hidden_dim)
 
 
 class DNATextBiEmbedding(nn.Module):
@@ -178,15 +264,20 @@ class DNATextBiEmbedding(nn.Module):
         self.use_dna_embedder = use_dna_embedder
         if use_dna_embedder:
             self.dna_embedder = BasewiseTransformerEmbedder(
-                base_vocab_size=4,  # A, C, G, T
-                base_dim=config.dna_base_size,
-                hidden_dim=config.hidden_size,
-                n_heads=config.dna_num_attention_heads,
-                n_layers=config.dna_num_hidden_layers,
-                max_len=config.dna_max_position_embeddings,
-                PositionalEmbedding=config.dna_positional_embedding_type,
+                token_vocab_size=config.dna_vocab_size,
+                base_vocab_size=config.dna_base_vocab_size,
+                max_bpe_len=config.max_dna_bpe_len,
+                base_dim=config.dna_base_dim,
+                hidden_dim=config.dna_hidden_dim,
+                n_heads=config.dna_n_heads,
+                n_layers=config.dna_n_layers,
+                base_pad_id=config.dna_pad_token_id,
+                pooling=config.dna_pooling,
+                PositionalEmbedding=config.dna_positional_embedding,
+                trainable_bpe2base=config.trainable_dna_bpe2base,
+                init_base_ids=config.init_dna_base_ids
             )
-
+            
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -224,51 +315,51 @@ class DNATextBiEmbedding(nn.Module):
             embeddings_list.append(text_embeds)
             token_types_list.append(torch.zeros((B, T_text), dtype=torch.long, device=text_embeds.device))
 
-    # --- DNA embedding ---
-    if has_dna:
-        assert hasattr(self, 'dna_embedder'), (
-            "DNA embedding requested but `self.dna_embedder` is not defined. "
-            "Please set `self.use_dna_embedder = True` and define `self.dna_embedder` in __init__."
-        )
-
-        assert dna_ids.ndim == 3, (
-            f"`dna_ids` must have shape (B, T, L), but got {dna_ids.shape}"
-        )
-
-        dna_embeds = self.dna_embedder(dna_ids)  # (B, T_dna, H)
-        B_dna, T_dna = dna_embeds.shape[:2]
-
-        if B is not None:
-            assert B_dna == B, (
-                f"Batch size mismatch between text and DNA embeddings: text B={B}, dna B={B_dna}"
+        # --- DNA embedding ---
+        if has_dna:
+            assert hasattr(self, 'dna_embedder'), (
+                "DNA embedding requested but `self.dna_embedder` is not defined. "
+                "Please set `self.use_dna_embedder = True` and define `self.dna_embedder` in __init__."
             )
-        else:
-            B = B_dna
 
-        embeddings_list.append(dna_embeds)
-        token_types_list.append(torch.ones((B_dna, T_dna), dtype=torch.long, device=dna_embeds.device))
+            assert dna_ids.ndim == 3, (
+                f"`dna_ids` must have shape (B, T, L), but got {dna_ids.shape}"
+            )
 
-    # --- Concatenate ---
-    inputs_embeds = torch.cat(embeddings_list, dim=1)  # (B, T_total, H)
-    token_type_ids = torch.cat(token_types_list, dim=1)  # (B, T_total)
+            dna_embeds = self.dna_embedder(dna_ids)  # (B, T_dna, H)
+            B_dna, T_dna = dna_embeds.shape[:2]
 
-    assert inputs_embeds.shape[:2] == token_type_ids.shape, (
-        f"Mismatched embedding and token_type shapes: "
-        f"{inputs_embeds.shape[:2]} vs {token_type_ids.shape}"
-    )
+            if B is not None:
+                assert B_dna == B, (
+                    f"Batch size mismatch between text and DNA embeddings: text B={B}, dna B={B_dna}"
+                )
+            else:
+                B = B_dna
 
-    # --- Final embedding ---
-    token_type_embeddings = self.token_type_embeddings(token_type_ids)
+            embeddings_list.append(dna_embeds)
+            token_types_list.append(torch.ones((B_dna, T_dna), dtype=torch.long, device=dna_embeds.device))
 
-    assert inputs_embeds.shape == token_type_embeddings.shape, (
-        f"Shape mismatch between `inputs_embeds` ({inputs_embeds.shape}) "
-        f"and `token_type_embeddings` ({token_type_embeddings.shape})"
-    )
+        # --- Concatenate ---
+        inputs_embeds = torch.cat(embeddings_list, dim=1)  # (B, T_total, H)
+        token_type_ids = torch.cat(token_types_list, dim=1)  # (B, T_total)
 
-    embeddings = inputs_embeds + token_type_embeddings
-    embeddings = self.LayerNorm(embeddings)
-    embeddings = self.dropout(embeddings)
-    return embeddings
+        assert inputs_embeds.shape[:2] == token_type_ids.shape, (
+            f"Mismatched embedding and token_type shapes: "
+            f"{inputs_embeds.shape[:2]} vs {token_type_ids.shape}"
+        )
+
+        # --- Final embedding ---
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        assert inputs_embeds.shape == token_type_embeddings.shape, (
+            f"Shape mismatch between `inputs_embeds` ({inputs_embeds.shape}) "
+            f"and `token_type_embeddings` ({token_type_embeddings.shape})"
+        )
+
+        embeddings = inputs_embeds + token_type_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
 
 
 
@@ -299,3 +390,65 @@ def get_sin_cos(seq_len, dim, device):
 def rotate_half(x):
     x1, x2 = x[..., ::2], x[..., 1::2]
     return torch.cat([-x2, x1], dim=-1)
+
+
+def build_init_base_ids(bpe_tokenizer: PreTrainedTokenizer,
+                        base_tokenizer: PreTrainedTokenizer,
+                        max_bpe_len: int,
+                        base_pad_id: int) -> torch.LongTensor:
+    init_ids = []
+
+    for i in range(bpe_tokenizer.vocab_size):
+        bpe_token = bpe_tokenizer.convert_ids_to_tokens(i)
+        base_ids = base_tokenizer(bpe_token, add_special_tokens=False)["input_ids"]
+        base_ids = base_ids[:max_bpe_len]  # truncate
+        base_ids += [base_pad_id] * (max_bpe_len - len(base_ids))  # pad
+        init_ids.append(base_ids)
+        # print(f"Token: {bpe_token}, Base IDs: {base_ids}")
+
+    return torch.tensor(init_ids, dtype=torch.long)
+
+def compute_max_bpe_len(bpe_tokenizer, base_tokenizer, verbose=False):
+    max_len = 0
+    longest_token = None
+    print("Computing max BPE length...")
+
+    for i in range(bpe_tokenizer.vocab_size):
+        bpe_token = bpe_tokenizer.convert_ids_to_tokens(i)
+        if bpe_token == bpe_tokenizer.pad_token:
+            continue
+
+        # bpe_token = bpe_token.replace("Ġ", "").replace("▁", "")
+
+        base_ids = base_tokenizer(bpe_token, add_special_tokens=False)["input_ids"]
+        base_len = len(base_ids)
+
+        if base_len > max_len:
+            max_len = base_len
+            longest_token = bpe_token if verbose else None
+            print(f"New longest token: {longest_token}, length: {max_len}") if verbose else None
+
+    if verbose:
+        print(f"Longest token: {longest_token}, length: {max_len}")
+    return max_len
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Build initial base IDs for BPE to base mapping.")
+    parser.add_argument('--tokenizer_name', type=str, default='zhihan1996/DNABERT-2-117M', help='Name or path of the BPE tokenizer')
+    parser.add_argument('--save_path', type=str, default='./saved_models/dna2base_embeddings', help='Path to save the initial base IDs')
+    parser.add_argument('--base_tokenizer_path', type=str, default='./saved_models/base_tokenizer',
+                        help='Name or path of the base tokenizer')
+
+    args = parser.parse_args()
+    bpe_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    base_tokenizer = PreTrainedTokenizerFast.from_pretrained(args.base_tokenizer_path)
+    os.makedirs(args.save_path, exist_ok=True)
+
+    max_bpe_len = compute_max_bpe_len(bpe_tokenizer, base_tokenizer, verbose=True)
+    print(f"Max BPE length: {max_bpe_len}")
+    init_base_ids = build_init_base_ids(bpe_tokenizer, base_tokenizer, max_bpe_len, base_pad_id=0)
+    print(f"Initial base IDs shape: {init_base_ids.shape}")
+    torch.save(init_base_ids, os.path.join(args.save_path, "init_base_ids.pth"))
+    print(f"Initial base IDs saved to {os.path.join(args.save_path, 'init_base_ids.pth')}")

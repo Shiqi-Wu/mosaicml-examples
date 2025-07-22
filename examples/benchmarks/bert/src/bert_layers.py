@@ -53,7 +53,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (MaskedLMOutput,
                                            SequenceClassifierOutput)
 from transformers.models.bert.modeling_bert import BertPreTrainedModel
-from dna_text_biembedder import DNATextBiEmbedding
+from dna_text_biembedder import DNATextBiEmbedding, BasewiseTransformerEmbedder
 
 try:
     raise ImportError('Disabling Triton on purpose, for Triton affects execution.')
@@ -892,7 +892,8 @@ class BertForMaskedLM(BertPreTrainedModel):
                 'If you want to use `BertForMaskedLM` make sure `config.is_decoder=False` for '
                 'bi-directional self-attention.')
 
-        self.bert = BertModel(config, add_pooling_layer=False)
+        if not getattr(config, 'use_deepembeddings', False):
+            self.bert = BertModel(config, add_pooling_layer=False)
         self.cls = BertOnlyMLMHead(config,
                                    self.bert.embeddings.word_embeddings.weight)
 
@@ -1201,47 +1202,6 @@ class BertForQuestionAnswering(BertPreTrainedModel):
 
 # ======  DeepEmbed-DNABERT =======
 class DeepEmbed_DNABertModel(BertPreTrainedModel):
-    """Overall BERT model.
-
-    Args:
-        config: a BertConfig class instance with the configuration to build a new model
-
-    Inputs:
-        `input_ids`: a torch.LongTensor of shape [batch_size, sequence_length]
-            with the word token indices in the vocabulary(see the tokens preprocessing logic in the scripts
-            `extract_features.py`, `run_classifier.py` and `run_squad.py`)
-        `token_type_ids`: an optional torch.LongTensor of shape [batch_size, sequence_length] with the token
-            types indices selected in [0, 1]. Type 0 corresponds to a `sentence A` and type 1 corresponds to
-            a `sentence B` token (see BERT paper for more details).
-        `attention_mask`: an optional torch.LongTensor of shape [batch_size, sequence_length] with indices
-            selected in [0, 1]. It's a mask to be used if the input sequence length is smaller than the max
-            input sequence length in the current batch. It's the mask that we typically use for attention when
-            a batch has varying length sentences.
-        `output_all_encoded_layers`: boolean which controls the content of the `encoded_layers` output as described below. Default: `True`.
-
-    Outputs: Tuple of (encoded_layers, pooled_output)
-        `encoded_layers`: controlled by `output_all_encoded_layers` argument:
-            - `output_all_encoded_layers=True`: outputs a list of the full sequences of encoded-hidden-states at the end
-                of each attention block (i.e. 12 full sequences for BERT-base, 24 for BERT-large), each
-                encoded-hidden-state is a torch.FloatTensor of size [batch_size, sequence_length, hidden_size],
-            - `output_all_encoded_layers=False`: outputs only the full sequence of hidden-states corresponding
-                to the last attention block of shape [batch_size, sequence_length, hidden_size],
-        `pooled_output`: a torch.FloatTensor of size [batch_size, hidden_size] which is the output of a
-            classifier pretrained on top of the hidden state associated to the first character of the
-            input (`CLS`) to train on the Next-Sentence task (see BERT's paper).
-
-    Example usage:
-    ```python
-    # Already been converted into WordPiece token ids
-    input_ids = torch.LongTensor([[31, 51, 99], [15, 5, 0]])
-    input_mask = torch.LongTensor([[1, 1, 1], [1, 1, 0]])
-    token_type_ids = torch.LongTensor([[0, 0, 1], [0, 1, 0]])
-    config = modeling.BertConfig(vocab_size_or_config_json_file=32000, hidden_size=768,
-        num_hidden_layers=12, num_attention_heads=12, intermediate_size=3072)
-    model = BertModel(config=config)
-    all_encoder_layers, pooled_output = model(input_ids, token_type_ids, input_mask)
-    ```
-    """
 
     def __init__(self, config, add_pooling_layer=True):
         super(DeepEmbed_DNABertModel, self).__init__(config)
@@ -1319,3 +1279,19 @@ class DeepEmbed_DNABertModel(BertPreTrainedModel):
             return encoder_outputs, pooled_output
 
         return encoder_outputs, None
+
+class DeepEmbed_DNABertForMaskedLM(BertForMaskedLM):
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        if config.is_decoder:
+            warnings.warn(
+                'If you want to use `DeepEmbed_DNABertForMaskedLM` make sure `config.is_decoder=False` for '
+                'bi-directional self-attention.')
+
+        self.bert = DeepEmbed_DNABertModel(config, add_pooling_layer=False)
+        self.cls = BertOnlyMLMHead(config)
+
+        # Initialize weights and apply final processing
+        self.post_init()

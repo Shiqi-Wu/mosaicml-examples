@@ -166,9 +166,33 @@ class StreamingTextDataset(StreamingDataset):
                               max_length=self.max_seq_len)
 
     def _read_binary_tokenized_sample(self, sample):
-        return torch.from_numpy(
-            np.frombuffer(sample['tokens'],
-                          dtype=np.int64)[:self.max_seq_len].copy())
+        data_type = sample.get("type", "int64")
+        print(f"[DEBUG] Reading binary tokenized sample with data type: {data_type}")
+        if data_type == "int16":
+            return torch.from_numpy(
+                np.frombuffer(sample['tokens'],
+                              dtype=np.int16)[:self.max_seq_len].copy())
+        elif data_type == "int32":
+            return torch.from_numpy(
+                np.frombuffer(sample['tokens'],
+                              dtype=np.int32)[:self.max_seq_len].copy())
+        elif data_type == "int64":
+            return torch.from_numpy(
+                np.frombuffer(sample['tokens'],
+                              dtype=np.int64)[:self.max_seq_len].copy())
+        elif data_type == "uint16":
+            return torch.from_numpy(
+                np.frombuffer(sample['tokens'],
+                              dtype=np.uint16)[:self.max_seq_len].copy())
+        elif data_type == "uint32":
+            return torch.from_numpy(
+                np.frombuffer(sample['tokens'],
+                              dtype=np.uint32)[:self.max_seq_len].copy())
+        else:
+            raise ValueError(
+                f'Unsupported data type {data_type} in sample: {sample}. '
+                'Supported types are int16, int32, int64, uint16, uint32.'
+            )
 
     # How to process a sample
     def __getitem__(self, idx: int) -> Union[Dict[str, Any], torch.Tensor]:
