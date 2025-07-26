@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 import src.hf_bert as hf_bert_module
 import src.mosaic_bert as mosaic_bert_module
+import src.deepembed_mosaic_bert as deepembed_mosaic_bert_module
 import src.text_data as text_data_module
 from composer import Trainer, algorithms
 from composer.callbacks import (HealthChecker, LRMonitor, MemoryMonitor,
@@ -133,6 +134,9 @@ def build_dataloader(cfg, tokenizer, device_batch_size):
     if cfg.name == 'text':
         return text_data_module.build_text_dataloader(cfg, tokenizer,
                                                       device_batch_size)
+    elif cfg.name == 'dna':
+        return text_data_module.build_dna_dataloader(cfg, tokenizer,
+                                                     device_batch_size)
     else:
         raise ValueError(f'Not sure how to build dataloader with config: {cfg}')
 
@@ -152,6 +156,18 @@ def build_model(cfg: DictConfig):
             model_config=cfg.get('model_config', None),
             tokenizer_name=cfg.get('tokenizer_name', None),
             gradient_checkpointing=cfg.get('gradient_checkpointing', None))
+
+    elif cfg.name == 'deepembed_mosaic_bert':
+        return deepembed_mosaic_bert_module.create_deepembed_mosaic_bert(
+            pretrained_model_name=cfg.pretrained_model_name,
+            model_config=cfg.get('model_config', None),
+            tokenizer_name=cfg.get('tokenizer_name', None),
+            gradient_checkpointing=cfg.get('gradient_checkpointing', None),
+            pretrained_checkpoint=cfg.get('pretrained_checkpoint', None),
+            init_embeddings_dna2base=cfg.get('init_embeddings_dna2base', None),
+            base_checkpoint=cfg.get('base_checkpoint', None),
+        )
+
     else:
         raise ValueError(f'Not sure how to build model with name={cfg.name}')
 
@@ -270,6 +286,12 @@ def main(cfg: DictConfig,
 
     print('Logging config...')
     log_config(cfg)
+
+    print("[DEBUG] Try iterating train_loader manually...")
+    print(f"[DEBUG] Dataset length: {len(trainer.state.train_dataloader.dataset)}")
+    batch = next(iter(trainer.state.train_dataloader))
+    print("[DEBUG] Got batch:", batch)
+
 
     if do_train:
         print('Starting training...')

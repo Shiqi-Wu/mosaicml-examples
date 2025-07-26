@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import BertTokenizer
 from transformers import PreTrainedTokenizer, AutoTokenizer, PreTrainedTokenizerFast
+import configuration_bert as configuration_bert_module
 import math
 
 from tokenizers import Tokenizer
@@ -12,6 +13,34 @@ from tokenizers.processors import TemplateProcessing
 import argparse
 from typing import Optional
 import os
+
+
+class DNABertConfig(configuration_bert_module.BertConfig):
+    def __init__(self,
+                 dna_vocab_size=4096,
+                 dna_base_vocab_size=8,
+                 dna_base_dim=64,
+                 max_dna_bpe_len=64,
+                 dna_n_heads=8,
+                 dna_n_layers=4,
+                 dna_pad_token_id=0,
+                 dna_position_embedding="ALiBi",
+                 trainable_dna_bpe2base=False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.dna_vocab_size = dna_vocab_size
+        self.dna_base_vocab_size = dna_base_vocab_size
+        self.dna_base_dim = dna_base_dim
+        self.max_dna_bpe_len = max_dna_bpe_len
+        self.dna_n_heads = dna_n_heads
+        self.dna_n_layers = dna_n_layers
+        self.dna_pad_token_id = dna_pad_token_id
+        self.dna_position_embedding = dna_position_embedding
+        self.trainable_dna_bpe2base = trainable_dna_bpe2base
+        self.dna_offset = kwargs.get("dna_offset", 40000) 
+        self.dna_pooling = kwargs.get("dna_pooling", "mean")
+        self.init_dna_base_ids = kwargs.get("init_dna_base_ids", None)
+
 
 # Alibi Attention Block
 class AlibiAttentionBlock(nn.Module):
@@ -149,7 +178,8 @@ class BasewiseTransformerEmbedder(nn.Module):
                  n_layers=2,
                  base_pad_id=0,
                  pooling="mean",
-                 PositionalEmbedding="ALiBi",
+                 PositionEmbedding="ALiBi",
+                 bpe_mask_token_id = None,
                  trainable_bpe2base=False,
                  init_base_ids=None):
         super().__init__()
@@ -162,22 +192,25 @@ class BasewiseTransformerEmbedder(nn.Module):
             init_base_ids=init_base_ids
         )
 
-        self.base_embedding = nn.Embedding(max_bpe_len, base_dim, padding_idx=base_pad_id)
+        self.base_embedding = nn.Embedding(base_vocab_size, base_dim, padding_idx=base_pad_id)
         self.pad_token_id = base_pad_id
         self.pooling = pooling
-        self.max_len = max_len
+        self.max_len = max_bpe_len
+        self.bpe_mask_token_id = bpe_mask_token_id if bpe_mask_token_id is not None else token_vocab_size + 1  # Default to vocab size + 1
+        self.mask_embedding = nn.Parameter(torch.zeros(hidden_dim))  # learnable embedding for [MASK]
+        nn.init.normal_(self.mask_embedding, std=0.02)
 
-        if PositionalEmbedding == "ALiBi":
+        if PositionEmbedding == "ALiBi":
             self.blocks = nn.ModuleList([
                 nn.Sequential(
-                    AlibiAttentionBlock(base_dim, n_heads, max_len=max_len),
+                    AlibiAttentionBlock(base_dim, n_heads, max_len=self.max_len),
                     nn.LayerNorm(base_dim),
                     nn.Linear(base_dim, base_dim),
                     nn.ReLU(),
                     nn.LayerNorm(base_dim)
                 ) for _ in range(n_layers)
             ])
-        elif PositionalEmbedding == "RoPE":
+        elif PositionEmbedding == "RoPE":
             self.blocks = nn.ModuleList([
                 nn.Sequential(
                     RoPEAttentionBlock(base_dim, n_heads),
@@ -188,7 +221,7 @@ class BasewiseTransformerEmbedder(nn.Module):
                 ) for _ in range(n_layers)
             ])
         else:
-            raise ValueError(f"Unsupported positional embedding: {PositionalEmbedding}")
+            raise ValueError(f"Unsupported positional embedding: {PositionEmbedding}")
 
         self.proj = nn.Linear(base_dim, hidden_dim)
 
@@ -202,11 +235,16 @@ class BasewiseTransformerEmbedder(nn.Module):
         Returns:
             Tensor of shape (B, T, hidden_dim)
         """
-        B, T = bpe_ids
-        flat_ids = bpe_ids.reshape(B * T, -1)              # (B*T, 1)
-        base_ids = self.bpe2base(flat_ids)                 # (B*T, L_max_bpe_len)
-        
-        x = self.base_embedding(flat_ids)                  # (B*T, L_max_bpe_len, base_dim)
+        print(f"[DEBUG] Forward pass with bpe_ids shape: {bpe_ids.shape}")
+        B, T = bpe_ids.shape
+        flat_ids = bpe_ids.reshape(B * T, -1)  
+        print(f"[DEBUG] Forward pass with flat_ids shape: {flat_ids.shape}")            # (B*T, 1)
+
+        base_ids = self.bpe2base(flat_ids) 
+        base_ids = base_ids.squeeze(1)  # (B*T, L_max_bpe_len)
+        print(f"[DEBUG] Forward pass with base_ids shape: {base_ids.shape}")                # (B*T, L_max_bpe_len)
+
+        x = self.base_embedding(base_ids)                  # (B*T, L_max_bpe_len, base_dim)
 
         for block in self.blocks:
             x = block(x)  # e.g. transformer layer
@@ -224,143 +262,85 @@ class BasewiseTransformerEmbedder(nn.Module):
         else:
             raise ValueError(f"Unsupported pooling strategy: {self.pooling}")
 
-        return self.proj(x_cls).reshape(B, T, -1)          # (B, T, hidden_dim)
+        x_cls = self.proj(x_cls)  # (B*T, hidden_dim)
+        x_final = x_cls.reshape(B, T, -1)
+        return x_final  # (B, T, hidden_dim)
+    
+    def load_base_embeddings(self, base_embeddings: torch.Tensor):
+        """
+        Load custom base embeddings.
+        Args:
+            base_embeddings: Tensor of shape (L, base_dim) where L is the number of base tokens.
+        """
+        if base_embeddings.shape[0] != self.bpe2base.embedding.num_embeddings:
+            raise ValueError(f"Expected {self.bpe2base.embedding.num_embeddings} base embeddings, got {base_embeddings.shape[0]}")
+        self.bpe2base.embedding.weight.data.copy_(base_embeddings)
+
+    def from_checkpoint(cls, checkpoint_path: str):
+        """
+        Load the model from a checkpoint.
+        Args:
+            checkpoint_path: Path to the checkpoint file.
+        Returns:
+            An instance of BasewiseTransformerEmbedder with loaded weights.
+        """
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
+        model = cls.__new__(cls)
+        model.load_state_dict(state_dict)
+        return model
 
 
 class DNATextBiEmbedding(nn.Module):
-    """Construct the embeddings for words, ignoring position.
-
-    There are no positional embeddings since we use ALiBi and token_type
-    embeddings.
-
-    This module is modeled after the Hugging Face BERT's
-    :class:`~transformers.model.bert.modeling_bert.BertEmbeddings`, but is
-    modified as part of Mosaic BERT's ALiBi implementation. The key change is
-    that position embeddings are removed. Position information instead comes
-    from attention biases that scale linearly with the position distance
-    between query and key tokens.
-
-    This module ignores the `position_ids` input to the `forward` method.
-    """
-
     def __init__(self, config, use_dna_embedder=False):
         super().__init__()
-        self.word_embeddings = nn.Embedding(config.vocab_size,
-                                            config.hidden_size,
-                                            padding_idx=config.pad_token_id)
-        # ALiBi doesn't use position embeddings
-        self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
-                                                  config.hidden_size)
-
-        # self.LayerNorm is not snake-cased to stick with TensorFlow model
-        # variable name and be able to load any TensorFlow checkpoint file
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.word_embeddings = nn.Embedding(config.dna_offset, config.hidden_size, padding_idx=config.pad_token_id)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.register_buffer('token_type_ids',
-                             torch.zeros(config.max_position_embeddings,
-                                         dtype=torch.long),
-                             persistent=False)
         self.use_dna_embedder = use_dna_embedder
+        self.dna_offset = getattr(config, "dna_offset", 40000)
+
         if use_dna_embedder:
             self.dna_embedder = BasewiseTransformerEmbedder(
                 token_vocab_size=config.dna_vocab_size,
                 base_vocab_size=config.dna_base_vocab_size,
                 max_bpe_len=config.max_dna_bpe_len,
                 base_dim=config.dna_base_dim,
-                hidden_dim=config.dna_hidden_dim,
+                hidden_dim=config.hidden_size,
                 n_heads=config.dna_n_heads,
                 n_layers=config.dna_n_layers,
                 base_pad_id=config.dna_pad_token_id,
                 pooling=config.dna_pooling,
-                PositionalEmbedding=config.dna_positional_embedding,
+                PositionEmbedding=config.dna_position_embedding,
                 trainable_bpe2base=config.trainable_dna_bpe2base,
                 init_base_ids=config.init_dna_base_ids
             )
             
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        dna_ids: Optional[torch.LongTensor] = None,
-        token_type_ids: Optional[torch.LongTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values_length: int = 0,
-    ) -> torch.Tensor:
-        has_text = input_ids is not None or inputs_embeds is not None
-        has_dna = dna_ids is not None and getattr(self, 'use_dna_embedder', False)
+    def forward(self, input_ids: torch.Tensor, token_type_ids: Optional[torch.Tensor] = None):
+        assert input_ids.ndim == 2, "Expected (B, T) input_ids"
+        B, T = input_ids.shape
+        print(f"[DEBUG] Forward pass with input_ids shape: {input_ids.shape}")
+        is_dna = input_ids >= self.dna_offset
+        is_text = ~is_dna
 
-        if not has_text and not has_dna:
-            raise ValueError(
-                "forward() requires at least one of `input_ids`, `inputs_embeds`, or `dna_base_ids`."
-            )
+        # Initialize output embedding
+        embed = torch.zeros(B, T, self.word_embeddings.embedding_dim, device=input_ids.device)
 
-        embeddings_list = []
-        token_types_list = []
-        B = None
+        # Embed text tokens
+        text_ids = input_ids.masked_fill(is_dna, 0)  # Mask DNA tokens so we don't embed them
+        print(f"[DEBUG] Text IDs shape: {text_ids.shape}, DNA IDs shape: {input_ids[is_dna].shape}")
+        text_embeds = self.word_embeddings(text_ids)  # (B, T, H)
+        print(f"[DEBUG] Text embeddings shape: {text_embeds.shape}")
 
-        # Text embedding
-        if has_text:
-            if input_ids is not None and inputs_embeds is not None:
-                raise ValueError("Specify only one of `input_ids` or `inputs_embeds`, not both.")
+        embed += text_embeds * is_text.unsqueeze(-1)  # Use text embeddings at text positions
 
-            if input_ids is not None:
-                text_embeds = self.word_embeddings(input_ids)
-                B, T_text = input_ids.shape
-            else:
-                text_embeds = inputs_embeds
-                B, T_text = inputs_embeds.shape[:2]
+        if self.use_dna_embedder and is_dna.any():
+            dna_ids = (input_ids - self.dna_offset).masked_fill(~is_dna, 0)  # Keep shape (B, T)
+            print(f"[DEBUG] DNA IDs shape: {dna_ids.shape}")
+            dna_embeds = self.dna_embedder(dna_ids)  # (B, T, H) ← you must support (B, T) input
+            embed += dna_embeds * is_dna.unsqueeze(-1)  # Use DNA embedding at DNA positions
+        print(f"[DEBUG] Combined embeddings shape: {embed.shape}")
 
-            assert text_embeds.ndim == 3, f"`text_embeds` should be (B, T, H), but got {text_embeds.shape}"
-            embeddings_list.append(text_embeds)
-            token_types_list.append(torch.zeros((B, T_text), dtype=torch.long, device=text_embeds.device))
-
-        # --- DNA embedding ---
-        if has_dna:
-            assert hasattr(self, 'dna_embedder'), (
-                "DNA embedding requested but `self.dna_embedder` is not defined. "
-                "Please set `self.use_dna_embedder = True` and define `self.dna_embedder` in __init__."
-            )
-
-            assert dna_ids.ndim == 3, (
-                f"`dna_ids` must have shape (B, T, L), but got {dna_ids.shape}"
-            )
-
-            dna_embeds = self.dna_embedder(dna_ids)  # (B, T_dna, H)
-            B_dna, T_dna = dna_embeds.shape[:2]
-
-            if B is not None:
-                assert B_dna == B, (
-                    f"Batch size mismatch between text and DNA embeddings: text B={B}, dna B={B_dna}"
-                )
-            else:
-                B = B_dna
-
-            embeddings_list.append(dna_embeds)
-            token_types_list.append(torch.ones((B_dna, T_dna), dtype=torch.long, device=dna_embeds.device))
-
-        # --- Concatenate ---
-        inputs_embeds = torch.cat(embeddings_list, dim=1)  # (B, T_total, H)
-        token_type_ids = torch.cat(token_types_list, dim=1)  # (B, T_total)
-
-        assert inputs_embeds.shape[:2] == token_type_ids.shape, (
-            f"Mismatched embedding and token_type shapes: "
-            f"{inputs_embeds.shape[:2]} vs {token_type_ids.shape}"
-        )
-
-        # --- Final embedding ---
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        assert inputs_embeds.shape == token_type_embeddings.shape, (
-            f"Shape mismatch between `inputs_embeds` ({inputs_embeds.shape}) "
-            f"and `token_type_embeddings` ({token_type_embeddings.shape})"
-        )
-
-        embeddings = inputs_embeds + token_type_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-        return embeddings
-
+        return embed  # (B, T, H)
 
 
 def apply_rope(q, k, seq_dim=2):

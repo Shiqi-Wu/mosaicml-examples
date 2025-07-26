@@ -12,16 +12,14 @@ def build_base_tokenizer(vocab=None) -> PreTrainedTokenizerFast:
     if vocab is None:
         vocab = {
             "[PAD]": 0,
-            "[MASK]": 1,
-            "[UNK]": 2,
-            "[CLS]": 3,
-            "A": 4,
-            "C": 5,
-            "G": 6,
-            "T": 7,
+            "A": 1,
+            "C": 2,
+            "G": 3,
+            "T": 4,
+            "N": 5,
         }
 
-    tokenizer_core = Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
+    tokenizer_core = Tokenizer(WordLevel(vocab=vocab, unk_token='N'))
     tokenizer_core.pre_tokenizer = Split(pattern="", behavior="isolated")
 
     tokenizer_core.post_processor = TemplateProcessing(

@@ -855,6 +855,34 @@ class BertOnlyMLMHead(nn.Module):
         prediction_scores = self.predictions(sequence_output)
         return prediction_scores
 
+class BertHybridLMPredictionHead(nn.Module):
+    def __init__(self, config, text_embed_weight, dna_embed_weight):
+        super().__init__()
+        self.transform = BertPredictionHeadTransform(config)
+        self.decoder = nn.Linear(config.hidden_size, config.dna_offset + config.dna_vocab_size)
+        self.bias = self.decoder.bias
+        self.dna_offset = config.dna_offset
+
+        # Initialize weights block-wise
+        with torch.no_grad():
+            self.decoder.weight[:self.dna_offset].copy_(text_embed_weight)
+            self.decoder.weight[self.dna_offset:].copy_(dna_embed_weight)
+
+    def forward(self, hidden_states):
+        hidden_states = self.transform(hidden_states)
+        hidden_states = self.decoder(hidden_states)
+        return hidden_states
+
+class BertHybridMLMHead(nn.Module):
+
+    def __init__(self, config, text_embed_weight, dna_embed_weight):
+        super().__init__()
+        self.predictions = BertHybridLMPredictionHead(config,
+                                                text_embed_weight, dna_embed_weight)
+
+    def forward(self, sequence_output: torch.Tensor) -> torch.Tensor:
+        prediction_scores = self.predictions(sequence_output)
+        return prediction_scores
 
 class BertOnlyNSPHead(nn.Module):
 
@@ -1202,9 +1230,8 @@ class BertForQuestionAnswering(BertPreTrainedModel):
 
 # ======  DeepEmbed-DNABERT =======
 class DeepEmbed_DNABertModel(BertPreTrainedModel):
-
     def __init__(self, config, add_pooling_layer=True):
-        super(DeepEmbed_DNABertModel, self).__init__(config)
+        super().__init__(config)
         self.embeddings = DNATextBiEmbedding(config, use_dna_embedder=True)
         self.encoder = BertEncoder(config)
         self.pooler = BertPooler(config) if add_pooling_layer else None
@@ -1219,79 +1246,75 @@ class DeepEmbed_DNABertModel(BertPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
-        dna_ids: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         output_all_encoded_layers: Optional[bool] = False,
         masked_tokens_mask: Optional[torch.Tensor] = None,
         **kwargs
     ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Optional[torch.Tensor]]:
+        # === Patch 1: Try retrieving input_ids from kwargs if not explicitly passed ===
+        if input_ids is None:
+            input_ids = kwargs.get("input_ids", None)
+            if input_ids is None:
+                raise ValueError("DeepEmbed_DNABertModel requires `input_ids`.")
+
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
+            attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
+            token_type_ids = kwargs.get("token_type_ids", torch.zeros_like(input_ids))
 
-        if input_ids is None and dna_ids is None:
-            raise ValueError(
-                'Must specify either input_ids or dna_ids for DeepEmbed-DNABertModel!'
-            )
-        embedding_output = self.embeddings(input_ids, token_type_ids,
-                                           position_ids, dna_ids=dna_ids)
+        embedding_output = self.embeddings(input_ids=input_ids, token_type_ids=token_type_ids)
 
-        subset_mask = []
-        first_col_mask = []
-
-        if masked_tokens_mask is None:
-            subset_mask = None
-        else:
+        if masked_tokens_mask is not None:
             first_col_mask = torch.zeros_like(masked_tokens_mask)
             first_col_mask[:, 0] = True
             subset_mask = masked_tokens_mask | first_col_mask
+        else:
+            subset_mask = None
 
         encoder_outputs = self.encoder(
             embedding_output,
-            attention_mask,
+            attention_mask=attention_mask,
             output_all_encoded_layers=output_all_encoded_layers,
-            subset_mask=subset_mask)
+            subset_mask=subset_mask
+        )
 
-        if masked_tokens_mask is None:
-            sequence_output = encoder_outputs[-1]
-            pooled_output = self.pooler(
-                sequence_output) if self.pooler is not None else None
-        else:
-            # TD [2022-03-01]: the indexing here is very tricky.
+        if masked_tokens_mask is not None:
             attention_mask_bool = attention_mask.bool()
-            subset_idx = subset_mask[attention_mask_bool]  # type: ignore
-            sequence_output = encoder_outputs[-1][
-                masked_tokens_mask[attention_mask_bool][subset_idx]]
+            subset_idx = subset_mask[attention_mask_bool]
+            sequence_output = encoder_outputs[-1][masked_tokens_mask[attention_mask_bool][subset_idx]]
             if self.pooler is not None:
-                pool_input = encoder_outputs[-1][
-                    first_col_mask[attention_mask_bool][subset_idx]]
+                pool_input = encoder_outputs[-1][first_col_mask[attention_mask_bool][subset_idx]]
                 pooled_output = self.pooler(pool_input, pool=False)
             else:
                 pooled_output = None
+        else:
+            sequence_output = encoder_outputs[-1]
+            pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not output_all_encoded_layers:
             encoder_outputs = sequence_output
 
-        if self.pooler is not None:
-            return encoder_outputs, pooled_output
+        return (encoder_outputs, pooled_output) if self.pooler is not None else (encoder_outputs, None)
 
-        return encoder_outputs, None
 
 class DeepEmbed_DNABertForMaskedLM(BertForMaskedLM):
-
     def __init__(self, config):
         super().__init__(config)
-
         if config.is_decoder:
-            warnings.warn(
-                'If you want to use `DeepEmbed_DNABertForMaskedLM` make sure `config.is_decoder=False` for '
-                'bi-directional self-attention.')
-
+            warnings.warn("DeepEmbed_DNABertForMaskedLM assumes `is_decoder=False` for bi-directional attention.")
         self.bert = DeepEmbed_DNABertModel(config, add_pooling_layer=False)
-        self.cls = BertOnlyMLMHead(config)
 
-        # Initialize weights and apply final processing
+        dna_embed_weight = torch.nn.Parameter(
+            torch.empty(config.dna_vocab_size, config.hidden_size)
+        )
+        torch.nn.init.normal_(dna_embed_weight, mean=0.0, std=config.initializer_range)
+
+        self.cls = BertHybridMLMHead(
+            config,
+            text_embed_weight=self.bert.embeddings.word_embeddings.weight,
+            dna_embed_weight=dna_embed_weight,
+        )
+
         self.post_init()

@@ -167,7 +167,7 @@ class StreamingTextDataset(StreamingDataset):
 
     def _read_binary_tokenized_sample(self, sample):
         data_type = sample.get("type", "int64")
-        print(f"[DEBUG] Reading binary tokenized sample with data type: {data_type}")
+        # print(f"[DEBUG] Reading binary tokenized sample with data type: {data_type}")
         if data_type == "int16":
             return torch.from_numpy(
                 np.frombuffer(sample['tokens'],
