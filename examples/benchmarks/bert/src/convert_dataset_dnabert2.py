@@ -23,17 +23,20 @@ def convert_txt_to_mds(input_txt, output_dir, tokenizer_path, max_length=512, bo
         "type": "str", 
     }
     print(f"[DEBUG] Step 3: Converting data to MDS format...")
-    max_lines = 1000
+    # max_lines = 1000
     with MDSWriter(out=output_dir, columns=columns) as writer:
         with open(input_txt, 'r') as f:
             for idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
-                if idx >= max_lines:
-                    break
+                # if idx >= max_lines:
+                    # break
 
-                # 包装为 <dna>...</dna>
+                if idx % 10000 == 0:
+                    print(f"[DEBUG] Processing line {idx}...")
+
+                # <dna>...</dna>
                 line = f"{bos_text}<dna>{line}<dna>{eos_text}"
 
                 tokenized = tokenizer(line, truncation=True, max_length=max_length)

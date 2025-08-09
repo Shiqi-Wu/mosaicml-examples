@@ -235,14 +235,14 @@ class BasewiseTransformerEmbedder(nn.Module):
         Returns:
             Tensor of shape (B, T, hidden_dim)
         """
-        print(f"[DEBUG] Forward pass with bpe_ids shape: {bpe_ids.shape}")
+        # print(f"[DEBUG] Forward pass with bpe_ids shape: {bpe_ids.shape}")
         B, T = bpe_ids.shape
         flat_ids = bpe_ids.reshape(B * T, -1)  
-        print(f"[DEBUG] Forward pass with flat_ids shape: {flat_ids.shape}")            # (B*T, 1)
+        # print(f"[DEBUG] Forward pass with flat_ids shape: {flat_ids.shape}")            # (B*T, 1)
 
         base_ids = self.bpe2base(flat_ids) 
         base_ids = base_ids.squeeze(1)  # (B*T, L_max_bpe_len)
-        print(f"[DEBUG] Forward pass with base_ids shape: {base_ids.shape}")                # (B*T, L_max_bpe_len)
+        # print(f"[DEBUG] Forward pass with base_ids shape: {base_ids.shape}")                # (B*T, L_max_bpe_len)
 
         x = self.base_embedding(base_ids)                  # (B*T, L_max_bpe_len, base_dim)
 
@@ -318,7 +318,7 @@ class DNATextBiEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor, token_type_ids: Optional[torch.Tensor] = None):
         assert input_ids.ndim == 2, "Expected (B, T) input_ids"
         B, T = input_ids.shape
-        print(f"[DEBUG] Forward pass with input_ids shape: {input_ids.shape}")
+        # print(f"[DEBUG] Forward pass with input_ids shape: {input_ids.shape}")
         is_dna = input_ids >= self.dna_offset
         is_text = ~is_dna
 
@@ -327,18 +327,18 @@ class DNATextBiEmbedding(nn.Module):
 
         # Embed text tokens
         text_ids = input_ids.masked_fill(is_dna, 0)  # Mask DNA tokens so we don't embed them
-        print(f"[DEBUG] Text IDs shape: {text_ids.shape}, DNA IDs shape: {input_ids[is_dna].shape}")
+        # print(f"[DEBUG] Text IDs shape: {text_ids.shape}, DNA IDs shape: {input_ids[is_dna].shape}")
         text_embeds = self.word_embeddings(text_ids)  # (B, T, H)
-        print(f"[DEBUG] Text embeddings shape: {text_embeds.shape}")
+        # print(f"[DEBUG] Text embeddings shape: {text_embeds.shape}")
 
         embed += text_embeds * is_text.unsqueeze(-1)  # Use text embeddings at text positions
 
         if self.use_dna_embedder and is_dna.any():
             dna_ids = (input_ids - self.dna_offset).masked_fill(~is_dna, 0)  # Keep shape (B, T)
-            print(f"[DEBUG] DNA IDs shape: {dna_ids.shape}")
+            # print(f"[DEBUG] DNA IDs shape: {dna_ids.shape}")
             dna_embeds = self.dna_embedder(dna_ids)  # (B, T, H) ← you must support (B, T) input
             embed += dna_embeds * is_dna.unsqueeze(-1)  # Use DNA embedding at DNA positions
-        print(f"[DEBUG] Combined embeddings shape: {embed.shape}")
+        # print(f"[DEBUG] Combined embeddings shape: {embed.shape}")
 
         return embed  # (B, T, H)
 
@@ -423,7 +423,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     bpe_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
-    base_tokenizer = PreTrainedTokenizerFast.from_pretrained(args.base_tokenizer_path)
+    base_tokenizer = PreTrainedTokenizerFast.from_pretrained(args.base_tokenizer_path, local_files_only=True)
     os.makedirs(args.save_path, exist_ok=True)
 
     max_bpe_len = compute_max_bpe_len(bpe_tokenizer, base_tokenizer, verbose=True)

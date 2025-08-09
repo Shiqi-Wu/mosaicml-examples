@@ -20,6 +20,11 @@ from torchmetrics.classification.accuracy import MulticlassAccuracy
 from torchmetrics.classification.matthews_corrcoef import MatthewsCorrCoef
 from torchmetrics.regression.spearman import SpearmanCorrCoef
 
+# Add imports at top of the file
+from no_meta_hf import NoMetaHFModel
+from tokenizer_shim import TokenizerShim
+
+
 def create_deepembed_mosaic_bert(
     pretrained_model_name: str = 'bert-base-uncased',
     model_config: Optional[dict] = None,
@@ -72,20 +77,22 @@ def create_deepembed_mosaic_bert(
     if gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
+    # Build tokenizer: try your DNAText tokenizer; fallback to a shim
     if tokenizer_name is not None:
         tokenizer = DNATextUnifiedTokenizer.from_pretrained(tokenizer_name)
     else:
-        tokenizer = None
+        tokenizer = TokenizerShim(vocab=[], specials={"pad_token": "[PAD]"})
+
 
     metrics = [
         LanguageCrossEntropy(ignore_index=-100,
                              vocab_size=model.config.vocab_size),
         MaskedAccuracy(ignore_index=-100)
     ]
-    hf_model = HuggingFaceModel(model=model,
-                                tokenizer=tokenizer,
-                                use_logits=True,
-                                metrics=metrics)
+    hf_model = NoMetaHFModel(model=model,
+                             tokenizer=tokenizer,
+                             use_logits=True,
+                             metrics=metrics)
 
     if config.vocab_size % 8 != 0:
         config.vocab_size += 8 - (config.vocab_size % 8)

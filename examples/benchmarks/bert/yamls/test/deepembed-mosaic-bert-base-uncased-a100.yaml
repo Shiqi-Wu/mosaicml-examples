@@ -5,8 +5,8 @@
 
 # Follow the instructions in the README to set up ./my-copy-c4
 # Or point data paths to your remote C4 dataset
-data_local: /mnt/data/dnabert_2_pretrain
-data_remote: 
+data_local: /tmp/dnabert_2_cache_0
+data_remote: /mnt/data/dnabert_2_pretrain_full
 # data_remote: azure://sfmstorageeastus2.blob.core.windows.net/nlm/yeqibai/mosaic_bert_project/data/c4
 
 max_seq_len: 128
@@ -21,7 +21,7 @@ model:
   name: deepembed_mosaic_bert
   pretrained_model_name: 'bert-base-uncased'
   tokenizer_name: './saved_models/tokenizer_ckpt'
-  init_embeddings_dna2base: './saved_models/dna2base_embeddings/init_base_ids.pth'
+  init_embeddings_dna2base: './saved_models/init_base_ids.pth'
   # base_checkpoint: 'bert-base-uncased'
 
   model_config:

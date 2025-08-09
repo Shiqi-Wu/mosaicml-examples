@@ -5,8 +5,9 @@
 
 # Follow the instructions in the README to set up ./my-copy-c4
 # Or point data paths to your remote C4 dataset
-data_local: /mnt/data/dnabert_2_pretrain
-# data_remote: ./data/c4 # If blank, files must be present in data_local
+# data_local: /mnt/data/dnabert_2_pretrain_full
+data_local: /tmp/dnabert_2_cache_4
+data_remote: /mnt/data/dnabert_2_pretrain_full
 # data_remote: azure://sfmstorageeastus2.blob.core.windows.net/nlm/yeqibai/mosaic_bert_project/data/c4
 
 max_seq_len: 128
@@ -19,23 +20,33 @@ run_name: deepembed_mosaic_bert
 # Model
 model:
   name: deepembed_mosaic_bert
-  pretrained_model_name: mosaic-bert-base
+  pretrained_model_name: 'bert-base-uncased'
   tokenizer_name: './saved_models/tokenizer_ckpt'
-  init_embeddings_dna2base: './saved_models/dna2base_embeddings/init_base_ids.pth'
-  base_checkpoint: mosaic-bert-base
+  init_embeddings_dna2base: './saved_models/init_base_ids.pth'
+  # base_checkpoint: mosaic-bert-base
   # Mosaic BERT 'base' generally uses the default architecture values for from the Hugging Face BertConfig object
   # Note: if using the pretrained_checkpoint argument to create a model from an existing checkpoint, make sure
   # the model_config settings match the architecture of the existing model
   model_config:
-    num_attention_heads: 12 # bert-base default
-    num_hidden_layers: 12 # bert-base default
-    attention_probs_dropout_prob: 0.0 # This must be 0 for Flash Attention with triton to work
-    dna_vocab_size: 4096 # DNA BERT vocab size
-    max_dna_bpe_len: 64
+    vocab_size: 30528
+    hidden_size: 768
+    num_attention_heads: 12
+    num_hidden_layers: 12
+    intermediate_size: 3072
+    attention_probs_dropout_prob: 0.0  # 为 Flash Attention 兼容设为 0
+    max_position_embeddings: 512
+    type_vocab_size: 2
+    pad_token_id: 0
+
+    # DNA-specific config
+    dna_vocab_size: 4096
+    dna_base_vocab_size: 6
+    max_dna_bpe_len: 32
     dna_base_dim: 64
     dna_n_heads: 8
     dna_n_layers: 4
-    dna_pad_token_id: 0 # DNA BERT pad token id
+    dna_pad_token_id: 0
+    dna_offset: 30528
     dna_position_embedding: ALiBi
     trainable_dna_bpe2base: false
 
@@ -54,7 +65,7 @@ train_loader:
     shuffle: true
     mlm_probability: ${mlm_probability}
   drop_last: true
-  num_workers: 8
+  num_workers: 2
 
 eval_loader:
   name: text
@@ -67,7 +78,7 @@ eval_loader:
     shuffle: false
     mlm_probability: 0.15 # We always evaluate at 15% masking for consistent comparison
   drop_last: false
-  num_workers: 8
+  num_workers: 2
 
 # Optimization
 scheduler:
@@ -84,8 +95,8 @@ optimizer:
   eps: 1.0e-06
   weight_decay: 1.0e-5 # Amount of weight decay regularization
 
-algorithms:
-  fused_layernorm: {}
+# algorithms:
+#   fused_layernorm: {}
 
 max_duration: 286720000sp # Subsample the training data for ~275M samples
 eval_interval: 2000ba
@@ -111,9 +122,10 @@ callbacks:
 # (Optional) W&B logging
 loggers:
   wandb:
-    project: ${oc.env:WANDB_PROJECT}
-    entity: ${oc.env:WANDB_ENTITY}
-    group: ${oc.env:WANDB_RUN_GROUP}
+    project: dna_deepembed
+    entity: 18962528568shi-qiw-national-univeristy-of-sinagpore
+    group: debug-pretrain-dnabert2
+    # api_key: "23881c22767fe6c2ace907d463df9d8ac03f5278"
 
 # (Optional) Checkpoint to local filesystem or remote object store
 save_interval: 1000ba

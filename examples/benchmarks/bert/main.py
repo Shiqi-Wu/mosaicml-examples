@@ -134,9 +134,6 @@ def build_dataloader(cfg, tokenizer, device_batch_size):
     if cfg.name == 'text':
         return text_data_module.build_text_dataloader(cfg, tokenizer,
                                                       device_batch_size)
-    elif cfg.name == 'dna':
-        return text_data_module.build_dna_dataloader(cfg, tokenizer,
-                                                     device_batch_size)
     else:
         raise ValueError(f'Not sure how to build dataloader with config: {cfg}')
 
@@ -199,11 +196,13 @@ def main(cfg: DictConfig,
     print(f"Expecting index.json at: {cfg.get('data_remote', None)}/train/index.json")
 
     print('Building train loader...')
+    print(f"Local path: {cfg.get('data_local', None)}")
     train_loader = build_dataloader(
         cfg.train_loader,
         model.tokenizer,
         cfg.global_train_batch_size // dist.get_world_size(),
     )
+
     print('Building eval loader...')
     global_eval_batch_size = cfg.get('global_eval_batch_size',
                                      cfg.global_train_batch_size)
