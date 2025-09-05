@@ -314,6 +314,9 @@ class DNATextBiEmbedding(nn.Module):
                 trainable_bpe2base=config.trainable_dna_bpe2base,
                 init_base_ids=config.init_dna_base_ids
             )
+            if hasattr(self.dna_embedder, "mask_embedding") and isinstance(self.dna_embedder.mask_embedding, nn.Parameter):
+                self.dna_embedder.mask_embedding.requires_grad = False
+
             
     def forward(self, input_ids: torch.Tensor, token_type_ids: Optional[torch.Tensor] = None):
         assert input_ids.ndim == 2, "Expected (B, T) input_ids"
@@ -339,6 +342,9 @@ class DNATextBiEmbedding(nn.Module):
             dna_embeds = self.dna_embedder(dna_ids)  # (B, T, H) ← you must support (B, T) input
             embed += dna_embeds * is_dna.unsqueeze(-1)  # Use DNA embedding at DNA positions
         # print(f"[DEBUG] Combined embeddings shape: {embed.shape}")
+
+        embed = self.LayerNorm(embed)
+        embed = self.dropout(embed)
 
         return embed  # (B, T, H)
 

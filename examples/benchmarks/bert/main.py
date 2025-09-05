@@ -12,6 +12,7 @@ import src.hf_bert as hf_bert_module
 import src.mosaic_bert as mosaic_bert_module
 import src.deepembed_mosaic_bert as deepembed_mosaic_bert_module
 import src.text_data as text_data_module
+import src.lmdb_text_dataset as lmdb_text_module
 from composer import Trainer, algorithms
 from composer.callbacks import (HealthChecker, LRMonitor, MemoryMonitor,
                                 OptimizerMonitor, RuntimeEstimator,
@@ -24,6 +25,7 @@ from composer.optim.scheduler import (ConstantWithWarmupScheduler,
 from composer.utils import dist, reproducibility
 from omegaconf import DictConfig
 from omegaconf import OmegaConf as om
+
 
 
 def update_batch_size_info(cfg: DictConfig):
@@ -134,6 +136,10 @@ def build_dataloader(cfg, tokenizer, device_batch_size):
     if cfg.name == 'text':
         return text_data_module.build_text_dataloader(cfg, tokenizer,
                                                       device_batch_size)
+
+    elif cfg.name in ('text_lmdb', 'lmdb'):
+        # 走 LMDB 的 DataLoader
+        return lmdb_text_module.build_lmdb_text_dataloader(cfg, tokenizer, device_batch_size)
     else:
         raise ValueError(f'Not sure how to build dataloader with config: {cfg}')
 
@@ -212,6 +218,43 @@ def main(cfg: DictConfig,
         global_eval_batch_size // dist.get_world_size(),
     )
 
+    # print("\n[DEBUG] Inspect a few samples from train_loader ...")
+    # try:
+    #     for i, batch in enumerate(train_loader):
+    #         print(f"\n[DEBUG] Batch {i}:")
+    #         if isinstance(batch, dict):
+    #             for k, v in batch.items():
+    #                 if torch.is_tensor(v):
+    #                     print(f"  {k}: shape={tuple(v.shape)}, dtype={v.dtype}")
+    #                     # 打印前几个 token/label 看看
+    #                     print(f"    first row: {v[0][:20].tolist()}")
+    #                 else:
+    #                     print(f"  {k}: {type(v)} {v}")
+    #         else:
+    #             print(type(batch), batch)
+    #         if i >= 2:   # 只看前 3 个 batch
+    #             break
+    # except Exception as e:
+    #     print("[DEBUG] Failed to iterate train_loader:", e)
+
+    # print("\n[DEBUG] Inspect a few samples from eval_loader ...")
+    # try:
+    #     for i, batch in enumerate(eval_loader):
+    #         print(f"\n[DEBUG] Eval Batch {i}:")
+    #         if isinstance(batch, dict):
+    #             for k, v in batch.items():
+    #                 if torch.is_tensor(v):
+    #                     print(f"  {k}: shape={tuple(v.shape)}, dtype={v.dtype}")
+    #                     print(f"    first row: {v[0][:20].tolist()}")
+    #                 else:
+    #                     print(f"  {k}: {type(v)} {v}")
+    #         else:
+    #             print(type(batch), batch)
+    #         if i >= 1:   # 只看前 2 个 batch
+    #             break
+    # except Exception as e:
+    #     print("[DEBUG] Failed to iterate eval_loader:", e)
+
     # Optimizer
     optimizer = build_optimizer(cfg.optimizer, model)
 
@@ -223,6 +266,9 @@ def main(cfg: DictConfig,
         build_logger(name, logger_cfg)
         for name, logger_cfg in cfg.get('loggers', {}).items()
     ]
+
+    # if dist.get_global_rank() != 0:
+    #     loggers = []
 
     # Callbacks
     callbacks = [
