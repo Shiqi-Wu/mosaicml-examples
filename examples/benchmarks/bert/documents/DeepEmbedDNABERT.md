@@ -191,3 +191,5 @@ This will:
 
    * The YAML file specifies model architecture, dataset paths, and training hyperparameters.
    * Check logs and saved checkpoints under the configured output directory.
+
+![Wandb Log](figures/wandb_log.png)
