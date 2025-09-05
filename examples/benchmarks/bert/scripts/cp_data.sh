@@ -2,8 +2,6 @@
 set -euo pipefail
 
 ### ====== 必改区 ======
-LOCAL_USER="shiqi_w"      # 你本地电脑的用户名
-LOCAL_HOST="polaris"        # 你本地电脑的主机名（可以通过 `hostname` 命令查看）
 NSCC_USER="e0983425"
 NSCC_HOST="aspire-login"     # 例如 as-shared-login.nscc.sg 或你们的登录节点主机名
 # 你本地电脑上的代码与数据路径（请改成本地真实路径）
@@ -15,10 +13,10 @@ SRC_DATA="/home/shiqi_w/nfs/data/dnabert_2_pretrain_full"
 DEST_CODE="/home/users/nus/${NSCC_USER}/mosaicml-examples/examples/benchmarks/bert"
 DEST_DATA="/home/users/nus/${NSCC_USER}/dnabert_2_pretrain_full"
 
-# echo "[INFO] Upload code -> ${NSCC_USER}@${NSCC_HOST}:${DEST_CODE}"
-# scp -r "${LOCAL_USER}@${LOCAL_HOST}:${SRC_CODE}/" "${NSCC_USER}@${NSCC_HOST}:${DEST_CODE}/"
+echo "[INFO] Upload code -> ${NSCC_USER}@${NSCC_HOST}:${DEST_CODE}"
+rsync -avP "${SRC_CODE}/" "${NSCC_USER}@${NSCC_HOST}:${DEST_CODE}/"
 
 echo "[INFO] Upload data -> ${NSCC_USER}@${NSCC_HOST}:${DEST_DATA}"
-scp -r "${LOCAL_USER}@${LOCAL_HOST}:${SRC_DATA}/" "${NSCC_USER}@${NSCC_HOST}:${DEST_DATA}/"
+rsync -avP "${SRC_DATA}/" "${NSCC_USER}@${NSCC_HOST}:${DEST_DATA}/"
 
 echo "[DONE] Upload finished."

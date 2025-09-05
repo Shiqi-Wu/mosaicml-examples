@@ -5,7 +5,7 @@
 
 # Follow the instructions in the README to set up ./my-copy-c4
 # Or point data paths to your remote C4 dataset
-data_local: /tmp/dnabert_2_cache_0
+data_local: /tmp/dnabert_2_cache
 data_remote: /mnt/data/dnabert_2_pretrain_full
 # data_remote: azure://sfmstorageeastus2.blob.core.windows.net/nlm/yeqibai/mosaic_bert_project/data/c4
 

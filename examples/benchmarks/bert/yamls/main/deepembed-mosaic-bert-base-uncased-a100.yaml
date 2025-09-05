@@ -6,7 +6,7 @@
 # Follow the instructions in the README to set up ./my-copy-c4
 # Or point data paths to your remote C4 dataset
 # data_local: /mnt/data/dnabert_2_pretrain_full
-data_local: /tmp/dnabert_2_cache_4
+data_local: /tmp/dnabert_2_cache_11
 data_remote: /mnt/data/dnabert_2_pretrain_full
 # data_remote: azure://sfmstorageeastus2.blob.core.windows.net/nlm/yeqibai/mosaic_bert_project/data/c4
 
@@ -15,7 +15,12 @@ tokenizer_name: './saved_models/tokenizer_ckpt'
 mlm_probability: 0.3 # Mosaic BERT should use 30% masking for optimal performance
 
 # Run Name
-run_name: deepembed_mosaic_bert
+run_name: deepembed_mosaic_bert_${oc.env:RUN_ID,${oc.env:SLURM_JOB_ID,${oc.env:HOSTNAME,container}}}
+
+ddp_config:
+  find_unused_parameters: true
+  broadcast_buffers: false
+  static_graph: false
 
 # Model
 model:
@@ -54,31 +59,56 @@ model:
 
 
 # Dataloaders
+# train_loader:
+#   name: text
+#   dataset:
+#     local: ${data_local}
+#     remote: ${data_remote}
+#     split: train
+#     tokenizer_name: ${tokenizer_name}
+#     max_seq_len: ${max_seq_len}
+#     shuffle: true
+#     mlm_probability: ${mlm_probability}
+#   drop_last: true
+#   num_workers: 2
+
+# eval_loader:
+#   name: text
+#   dataset:
+#     local: ${data_local}
+#     remote: ${data_remote}
+#     split: val
+#     tokenizer_name: ${tokenizer_name}
+#     max_seq_len: ${max_seq_len}
+#     shuffle: false
+#     mlm_probability: 0.15 # We always evaluate at 15% masking for consistent comparison
+#   drop_last: false
+#   num_workers: 2
+
+
 train_loader:
-  name: text
+  name: text_lmdb
   dataset:
-    local: ${data_local}
-    remote: ${data_remote}
+    lmdb_path: /mnt/data/dnabert2_pretrain_lmdb/train/data.lmdb
     split: train
     tokenizer_name: ${tokenizer_name}
     max_seq_len: ${max_seq_len}
     shuffle: true
     mlm_probability: ${mlm_probability}
   drop_last: true
-  num_workers: 2
+  num_workers: 8
 
 eval_loader:
-  name: text
+  name: text_lmdb
   dataset:
-    local: ${data_local}
-    remote: ${data_remote}
+    lmdb_path: /mnt/data/dnabert2_pretrain_lmdb/val/data.lmdb
     split: val
     tokenizer_name: ${tokenizer_name}
     max_seq_len: ${max_seq_len}
     shuffle: false
     mlm_probability: 0.15 # We always evaluate at 15% masking for consistent comparison
   drop_last: false
-  num_workers: 2
+  num_workers: 8
 
 # Optimization
 scheduler:
@@ -99,12 +129,13 @@ optimizer:
 #   fused_layernorm: {}
 
 max_duration: 286720000sp # Subsample the training data for ~275M samples
+# max_duration: 1ba
 eval_interval: 2000ba
-global_train_batch_size: 2048 #4096
+global_train_batch_size: 512 #4096
 
 # System
 seed: 17
-device_eval_batch_size: 128
+device_eval_batch_size: 256
 # device_train_microbatch_size: 128
 device_train_microbatch_size: auto
 precision: amp_bf16
@@ -125,12 +156,14 @@ loggers:
     project: dna_deepembed
     entity: 18962528568shi-qiw-national-univeristy-of-sinagpore
     group: debug-pretrain-dnabert2
+    rank_zero_only: true
     # api_key: "23881c22767fe6c2ace907d463df9d8ac03f5278"
 
 # (Optional) Checkpoint to local filesystem or remote object store
 save_interval: 1000ba
 save_num_checkpoints_to_keep: 5  # Important, this cleans up checkpoints saved to DISK
-save_folder: '/mnt/data/save_dir/deepembed_mosaic_bert' # Local path to save checkpoints
+save_folder: /mnt/data/save_dir/${run_name}
+
 
 # (Optional) Load from local filesystem or remote object store to
 # start from an existing model checkpoint;

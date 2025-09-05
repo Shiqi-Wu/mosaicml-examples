@@ -3,7 +3,7 @@
 
 """Build a StreamingTextDataset dataset and dataloader for training."""
 
-import os
+import os, torch.distributed as dist
 from itertools import islice
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -19,6 +19,17 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 Tokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
+def _is_dist():
+    try:
+        return dist.is_available() and dist.is_initialized()
+    except Exception:
+        return False
+
+def _rank_str():
+    try:
+        return str(dist.get_rank()) if _is_dist() else "0"
+    except Exception:
+        return "0"
 
 def build_tokenizer(om_tokenizer_config: DictConfig,) -> Tokenizer:
     os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
@@ -89,7 +100,7 @@ class StreamingTextDataset(StreamingDataset):
     """
 
     def __init__(self,
-                 tokenizer: Tokenizer,
+                 tokenizer: Optional[Tokenizer],
                  max_seq_len: int,
                  streams: Optional[Sequence[Stream]] = None,
                  remote: Optional[str] = None,
@@ -153,8 +164,20 @@ class StreamingTextDataset(StreamingDataset):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # 不把 tokenizer 打包到子进程
+        state['tokenizer'] = None
+        return state
+    
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
     # How to tokenize a text sample to a token sample
     def _tokenize(self, text_sample):
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer is required for 'text' samples but is None.")
+
         if self.tokenizer._pad_token is None:
             # Some tokenizers (e.g. GPT2 tokenizer) have no padding token which causes bugs
             raise RuntimeError(
@@ -322,13 +345,34 @@ def build_text_dataloader(
                     cfg.dataset.get('keep_raw', True),
                 ))
 
+    base_local = cfg.dataset.get('local', None)
+    print(f"[INFO] Base local path from config: {base_local}")
+    if base_local is None or str(base_local).strip()=="":
+        base_local = f"/tmp/{os.getenv('USER','user')}/dnabert_2_cache"
+
+    # safe_local = os.path.join(base_local, _rank_str())
+    # os.makedirs(safe_local, exist_ok=True)
+    # print(f"[INFO] Using local cache directory: {safe_local}")
     # build dataset potentially with streams
+    print(f"[INFO] Building dataset (rank: {_rank_str()})...")
+    split = cfg.dataset.get('split', 'train')
+    # print(f"[INFO] distributed: {_is_dist()}, rank: {_rank_str()}, split: {split}")
+    # if (not _is_dist()) or dist.get_rank() == 0:
+    #     remote = cfg.dataset.get('remote', None)
+    #     if remote and remote.startswith('/'):
+    #         idx = os.path.join(remote, split, 'index.json')
+    #         if not os.path.isfile(idx):
+    #             raise FileNotFoundError(f"Expecting index.json at: {idx}")
+    # if _is_dist():
+    #     dist.barrier()
+    #     print(f"[INFO] barrier after index check (rank={_rank_str()})")
+
     dataset = StreamingTextDataset(
-        tokenizer=tokenizer,
+        tokenizer=None,
         max_seq_len=cfg.dataset.max_seq_len,
         streams=streams,
         remote=cfg.dataset.get('remote', None),
-        local=cfg.dataset.get('local', None),
+        local=base_local,
         split=cfg.dataset.get('split', None),
         download_retry=cfg.dataset.get('download_retry', 2),
         download_timeout=cfg.dataset.get('download_timeout', 60),
@@ -336,7 +380,7 @@ def build_text_dataloader(
         keep_zip=cfg.dataset.get('keep_zip', False),
         keep_raw=cfg.dataset.get('keep_raw', True),
         samples_per_epoch=cfg.dataset.get('samples_per_epoch', None),
-        predownload=cfg.dataset.get('predownload', 100_000),
+        predownload=min(4096, cfg.dataset.get('predownload', 4096)),
         partition_algo=cfg.dataset.get('partition_algo', 'orig'),
         num_canonical_nodes=cfg.dataset.get('num_canonical_nodes', 128),
         batch_size=device_batch_size,
@@ -344,6 +388,7 @@ def build_text_dataloader(
         shuffle_algo=cfg.dataset.get('shuffle_algo', 'py1s'),
         shuffle_seed=cfg.dataset.get('shuffle_seed', 9176),
     )
+    print(f"[INFO] Built dataset with {len(dataset)} samples.")
 
     mlm_probability = cfg.dataset.get('mlm_probability', None)
     collate_fn = transformers.DataCollatorForLanguageModeling(
@@ -365,10 +410,10 @@ def build_text_dataloader(
         collate_fn=collate_fn,
         batch_size=device_batch_size,
         drop_last=cfg.drop_last,
-        num_workers=cfg.num_workers,
-        pin_memory=cfg.get('pin_memory', True),
+        num_workers=0,
+        pin_memory=False,
         prefetch_factor=cfg.get('prefetch_factor', 2),
-        persistent_workers=cfg.get('persistent_workers', True),
+        persistent_workers=False,
         timeout=cfg.get('timeout', 0),
     )
 
